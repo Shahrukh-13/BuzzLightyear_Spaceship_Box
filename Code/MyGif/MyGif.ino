@@ -7,6 +7,11 @@
 #define NORMAL_SPEED  // Comment out for rame rate for render speed test
 #define GIF_IMAGE Buzz_Lightyear
 
+#define EEPROM_SSID_ADDRESS                   0
+#define EEPROM_PASSWORD_ADDRESS               101
+#define EEPROM_POWERCYCLE_COUNT_ADDRESS       202
+#define EEPROM_DISPLAY_INVERSE_FLAG_ADDRESS   203
+
 AnimatedGIF gif;
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite img = TFT_eSprite(&tft); // Create sprite object
@@ -52,6 +57,9 @@ unsigned long currentMillis = 0;
 unsigned long previousMillis = 0;
 const long interval = 1000; // 1 second
 
+uint8_t PowerCycle_Count;
+uint8_t Inverse_Display_Flag;
+
 void setup() 
 {
   Serial.begin(115200);
@@ -65,9 +73,30 @@ void setup()
   pinMode(21, INPUT); 
    
   wifi_connection_timeout_count = 0;
+  
+  /*Reset the PowerCycle_Count to 0 on fresh EEPROM*/
+  PowerCycle_Count = EEPROM.read(EEPROM_POWERCYCLE_COUNT_ADDRESS);
+  if(PowerCycle_Count == 0xFF)
+  {
+    PowerCycle_Count = 0;
+    EEPROM.write(EEPROM_POWERCYCLE_COUNT_ADDRESS,PowerCycle_Count);
+    EEPROM.commit();
+    PowerCycle_Count = EEPROM.read(EEPROM_POWERCYCLE_COUNT_ADDRESS);
+  }
+
+  /*Reset the Inverse_Display_Flag to 1 on fresh EEPROM*/
+  Inverse_Display_Flag = EEPROM.read(EEPROM_DISPLAY_INVERSE_FLAG_ADDRESS);
+  if(Inverse_Display_Flag == 0xFF)
+  {
+    Inverse_Display_Flag = 1;
+    EEPROM.write(EEPROM_DISPLAY_INVERSE_FLAG_ADDRESS,Inverse_Display_Flag);
+    EEPROM.commit();
+    Inverse_Display_Flag = EEPROM.read(EEPROM_DISPLAY_INVERSE_FLAG_ADDRESS);
+  }
+  
   tft.begin();
   tft.setRotation(2);
-  tft.invertDisplay(1); // depending on the variant of LCD being used
+  tft.invertDisplay(Inverse_Display_Flag); // depending on the variant of LCD being used
   tft.fillScreen(TFT_BLACK);
   //tft.setTextColor(TFT_WHITE, TFT_BLACK);
   gif.begin(BIG_ENDIAN_PIXELS);
@@ -84,8 +113,8 @@ void setup()
   {
     DISPLAY_GIF = 0;
 
-    ssid_i = read_String(0);
-    password_i = read_String(101);
+    ssid_i = read_String(EEPROM_SSID_ADDRESS);
+    password_i = read_String(EEPROM_PASSWORD_ADDRESS);
 
     ssid_i.toCharArray(ssid, ssid_i.length()+1);
     password_i.toCharArray(password, password_i.length()+1);
@@ -103,20 +132,45 @@ void setup()
   
     if(wifi_connection_timeout_count >=10)
     {
-      ESP.restart();
+      if(PowerCycle_Count <5)
+      {
+        PowerCycle_Count++;
+        EEPROM.write(EEPROM_POWERCYCLE_COUNT_ADDRESS,PowerCycle_Count);
+        EEPROM.commit();
+        ESP.restart();
+      }
+      else
+      {
+        //disconnect WiFi as it's no longer needed
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
+        display_menu();
+        DISPLAY_GIF = 1;
+        PowerCycle_Count = 0;
+        EEPROM.write(EEPROM_POWERCYCLE_COUNT_ADDRESS,PowerCycle_Count);
+        EEPROM.commit();
+        tft.fillScreen(TFT_BLACK);
+        tft.drawString("5 Fails", tft.width() / 2, tft.height() / 2, 4);
+        tft.drawString("Display Default GIF", tft.width() / 2, (tft.height() / 2) + 20, 4);
+        delay(2000);
+      }
     }
-    Serial.println(" CONNECTED");
-    tft.fillScreen(TFT_BLACK);
-    tft.drawString("Connected", tft.width() / 2, tft.height() / 2, 4);
-      
-    //init and get the time
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-    GetLocalTime();
-  
-    //disconnect WiFi as it's no longer needed
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-    tft.fillScreen(TFT_BLACK);
+
+    if(DISPLAY_GIF == 0)
+    {
+      Serial.println(" CONNECTED");
+      tft.fillScreen(TFT_BLACK);
+      tft.drawString("Connected", tft.width() / 2, tft.height() / 2, 4);
+        
+      //init and get the time
+      configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+      GetLocalTime();
+    
+      //disconnect WiFi as it's no longer needed
+      WiFi.disconnect(true);
+      WiFi.mode(WIFI_OFF);
+      tft.fillScreen(TFT_BLACK);
+    }
   }
 }
 
@@ -306,13 +360,25 @@ void scan_connect_reset()
     {
       ESP.restart();        
     }
-    else
+
+    else if(command == "display_inverse")
+    {
+      Inverse_Display_Flag = !Inverse_Display_Flag;
+      EEPROM.write(EEPROM_DISPLAY_INVERSE_FLAG_ADDRESS,Inverse_Display_Flag);
+      EEPROM.commit();
+      Serial.println();
+      Serial.print("Inverse_Display_Flag: ");
+      Serial.print(Inverse_Display_Flag);   
+      Serial.println(); 
+    }
+    
+    else if(command.indexOf(",") >= 0)
     {
       ssid_i = input.substring(0,input.indexOf(','));
       password_i =   input.substring(input.indexOf(',')+1);
   
-      writeString(0, ssid_i);
-      writeString(101, password_i);
+      writeString(EEPROM_SSID_ADDRESS, ssid_i);
+      writeString(EEPROM_PASSWORD_ADDRESS, password_i);
   
       Serial.println();
       Serial.print("new ssid: ");
@@ -330,10 +396,8 @@ void scan_connect_reset()
 void display_menu()
 {
   Serial.println();
-  Serial.print("Enter 'scan' to scan for available networks");
-  Serial.println();
-  Serial.print("If you want to connect to a new network, enter 'ssid' and 'passowrd' in following format: ssid,password");
-  Serial.println();
-  Serial.print("Enter 'reset' to reset");
-  Serial.println();
+  Serial.println("Enter 'scan' to scan for available networks");
+  Serial.println("If you want to connect to a new network, enter 'ssid' and 'passowrd' in following format: ssid,password");
+  Serial.println("Enter 'display_inverse' to inverse LCD display setting");
+  Serial.println("Enter 'reset' to reset");
 }
